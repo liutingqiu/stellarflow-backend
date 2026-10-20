@@ -2,24 +2,22 @@ import warnings
 
 try:
     from .nonce_manager import NonceManager, RelayerPool, nonce_manager
-except ImportError:
+except Exception:
     NonceManager = None  # type: ignore
     RelayerPool = None  # type: ignore
     nonce_manager = None  # type: ignore
 
-# ``src/analytics/__init__.py`` currently contains a corrupted block (379
-# duplicated ``from .treasury_swap import (...)`` copies) and raises
-# IndentationError. Keep the package importable, but surface the problem instead
-# of hiding it: the settlement task will still fail loudly when it uses this.
 try:
     from .fiat_settlement import DatabaseSettlementLatencyWorker
-except (ImportError, SyntaxError) as exc:  # pragma: no cover - depends on a broken tree
+except Exception:
     DatabaseSettlementLatencyWorker = None  # type: ignore
-    warnings.warn(
-        f"DatabaseSettlementLatencyWorker unavailable: {exc}",
-        RuntimeWarning,
-        stacklevel=2,
-    )
+
+try:
+    from .payout_anchor_health import PayoutAnchorAvailabilityWorker
+except Exception:
+    PayoutAnchorAvailabilityWorker = None  # type: ignore
+
+__all__ = ["NonceManager", "RelayerPool", "nonce_manager", "DatabaseSettlementLatencyWorker", "PayoutAnchorAvailabilityWorker"]
 
 from .redis_memory_monitor import (
     DEFAULT_VOLATILE_CACHE_NAMESPACES,

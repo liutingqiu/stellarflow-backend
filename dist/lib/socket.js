@@ -179,6 +179,11 @@ export function initSocket(server) {
         headers["x-frame-options"] = "DENY";
         headers["x-content-type-options"] = "nosniff";
     });
+    io.engine.on("initial_headers", (headers) => {
+        headers["content-security-policy"] = getApiContentSecurityPolicy();
+        headers["x-frame-options"] = "DENY";
+        headers["x-content-type-options"] = "nosniff";
+    });
     io.on("connection", (socket) => {
         console.log(`🔌 Client connected: ${socket.id}`);
         // Claim the authenticated user session (Issue #1054) so the stale session

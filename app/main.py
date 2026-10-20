@@ -74,6 +74,24 @@ try:
 except ImportError:
     _HAS_STREAMING_ROUTER = False
 
+try:
+    from app.routers.zk_proofs import router as zk_proofs_router
+    _HAS_ZK_PROOFS_ROUTER = True
+except ImportError:
+    _HAS_ZK_PROOFS_ROUTER = False
+
+try:
+    from app.routers import payout_anchor_health as payout_anchor_health_router
+    _HAS_PAYOUT_ANCHOR_HEALTH_ROUTER = True
+except ImportError:
+    _HAS_PAYOUT_ANCHOR_HEALTH_ROUTER = False
+
+try:
+    from app.routers import settlement_latency as settlement_latency_router
+    _HAS_SETTLEMENT_LATENCY_ROUTER = True
+except ImportError:
+    _HAS_SETTLEMENT_LATENCY_ROUTER = False
+
 log = structlog.get_logger(__name__)
 
 
@@ -270,3 +288,17 @@ if _HAS_REBALANCING_ROUTER:
 
 if _HAS_STREAMING_ROUTER:
     app.include_router(streaming_router.router, prefix="/api")
+
+if _HAS_ZK_PROOFS_ROUTER:
+    app.include_router(zk_proofs_router, prefix="/api/v1")
+
+if _HAS_PAYOUT_ANCHOR_HEALTH_ROUTER:
+    app.include_router(payout_anchor_health_router.router, prefix="/api/v1")
+
+if _HAS_SETTLEMENT_LATENCY_ROUTER:
+    # Fiat settlement latency + anchor failover dashboard.
+    try:
+        app.include_router(settlement_latency_router.router, prefix="/api/v1")
+    except AttributeError:
+        # settlement_latency exposes `router`; guard against partial imports.
+        pass

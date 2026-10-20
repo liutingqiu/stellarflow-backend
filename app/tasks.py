@@ -58,6 +58,22 @@ def monitor_fiat_settlement_latency(self: DatabaseTask, lookback_hours: int = 24
     return asyncio.run(worker.run_evaluation_cycle(lookback_hours=lookback_hours))
 
 
+@celery_app.task(
+    bind=True,
+    base=DatabaseTask,
+    name="app.tasks.check_payout_anchor_availability",
+    autoretry_for=(OSError, asyncpg.PostgresError),
+    retry_backoff=True,
+    max_retries=3,
+)
+def check_payout_anchor_availability(self: DatabaseTask) -> Dict[str, Any]:
+    """Issue #1288 — ping payout anchor /info endpoints every 30s, mark OFFLINE after 3 fails."""
+    from app.services.payout_anchor_health import PayoutAnchorAvailabilityWorker
+    database_url = DatabaseTask._database_url or os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+    worker = PayoutAnchorAvailabilityWorker(database_url=database_url)
+    return asyncio.run(worker.run_health_check_cycle())
+
+
 
 async def _aggregate(granularity: str, cutoff: datetime) -> int:
     database_url = DatabaseTask._database_url
@@ -1003,6 +1019,205 @@ def record_sla_metrics_task(self) -> Dict[str, Any]:
             "status": "error",
             "error": str(exc),
         }
+
+
+# ---------------------------------------------------------------------------
+# Issue #1262 — ZK Proof Generation Queue: prioritized workers + rate limiter
+# ---------------------------------------------------------------------------
+
+
+def _execute_zk_proof_generation(
+    user_id: str,
+    job_type: str,
+    proof_hex: str = "",
+    public_inputs: Optional[list] = None,
+    proof_scheme: str = "groth16",
+    transaction_id: Optional[str] = None,
+    queue: str = "zk_standard",
+) -> Dict[str, Any]:
+    """Shared proof-generation implementation for both priority queues.
+
+    Validates structure with the existing verification engine, then performs
+    the CPU-bound generation step (deterministic stand-in for a native
+    bellman/arkworks call). Pure function — easy to unit test without a
+    broker.
+    """
+    import time as _time
+
+    from app.services.proof_verification_engine import (
+        _compute_proof_hash,
+        _validate_proof_structure,
+    )
+
+    started = _time.monotonic()
+    inputs = list(public_inputs) if public_inputs else []
+    normalized_job = (job_type or "standard").strip().lower() or "standard"
+    normalized_scheme = (proof_scheme or "groth16").strip().lower() or "groth16"
+
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("user_id must be a non-empty string")
+
+    structure_error = _validate_proof_structure(proof_hex or "", inputs, normalized_scheme)
+    if structure_error:
+        return {
+            "success": False,
+            "user_id": user_id.strip(),
+            "job_type": normalized_job,
+            "queue": queue,
+            "proof_hash": "",
+            "error": f"Structure validation failed: {structure_error}",
+            "generation_time_ms": round((_time.monotonic() - started) * 1000, 2),
+        }
+
+    # Deterministic generation stand-in: sha256(proof_hex | inputs | job).
+    # Production would call the native prover here.
+    seed = (
+        (proof_hex or "").encode()
+        + b"|"
+        + "|".join(inputs).encode()
+        + b"|"
+        + normalized_job.encode()
+    )
+    digest = hashlib.sha256(seed).hexdigest()
+    proof_hash = _compute_proof_hash(proof_hex or "", inputs)
+
+    result: Dict[str, Any] = {
+        "success": True,
+        "user_id": user_id.strip(),
+        "job_type": normalized_job,
+        "queue": queue,
+        "proof_hash": proof_hash,
+        "generated_proof": digest,
+        "proof_scheme": normalized_scheme,
+        "public_inputs_count": len(inputs),
+        "generation_time_ms": round((_time.monotonic() - started) * 1000, 2),
+    }
+    if transaction_id:
+        result["transaction_id"] = transaction_id
+    return result
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.generate_zk_proof_high_priority",
+    queue="zk_high_priority",
+    routing_key="zk.high",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    autoretry_for=(OSError,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def generate_zk_proof_high_priority(
+    self: Task,
+    user_id: str,
+    job_type: str = "remittance_redemption",
+    proof_hex: str = "",
+    public_inputs: Optional[list] = None,
+    proof_scheme: str = "groth16",
+    transaction_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a time-sensitive ZK proof on the high-priority queue."""
+    from app.services.zk_proof_queue import ZK_HIGH_PRIORITY_QUEUE, get_rate_limiter
+
+    limiter = get_rate_limiter()
+    status = limiter.check(user_id)
+    if not status.allowed:
+        raise self.retry(
+            countdown=max(1.0, status.retry_after),
+            max_retries=3,
+            exc=RuntimeError(f"per-user ZK proof rate limit exceeded ({status.limit}/min)"),
+        )
+    # Consume one token for the actual execution (check above is non-consuming).
+    limiter.is_allowed(user_id)
+    return _execute_zk_proof_generation(
+        user_id=user_id,
+        job_type=job_type,
+        proof_hex=proof_hex,
+        public_inputs=public_inputs,
+        proof_scheme=proof_scheme,
+        transaction_id=transaction_id,
+        queue=ZK_HIGH_PRIORITY_QUEUE,
+    )
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.generate_zk_proof_standard",
+    queue="zk_standard",
+    routing_key="zk.standard",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    autoretry_for=(OSError,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def generate_zk_proof_standard(
+    self: Task,
+    user_id: str,
+    job_type: str = "standard",
+    proof_hex: str = "",
+    public_inputs: Optional[list] = None,
+    proof_scheme: str = "groth16",
+    transaction_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a ZK proof on the standard queue (fair-share, no starvation)."""
+    from app.services.zk_proof_queue import ZK_STANDARD_QUEUE, get_rate_limiter
+
+    limiter = get_rate_limiter()
+    status = limiter.check(user_id)
+    if not status.allowed:
+        raise self.retry(
+            countdown=max(1.0, status.retry_after),
+            max_retries=3,
+            exc=RuntimeError(f"per-user ZK proof rate limit exceeded ({status.limit}/min)"),
+        )
+    limiter.is_allowed(user_id)
+    return _execute_zk_proof_generation(
+        user_id=user_id,
+        job_type=job_type,
+        proof_hex=proof_hex,
+        public_inputs=public_inputs,
+        proof_scheme=proof_scheme,
+        transaction_id=transaction_id,
+        queue=ZK_STANDARD_QUEUE,
+    )
+
+
+def request_zk_proof_generation(
+    user_id: str,
+    job_type: str = "standard",
+    priority: str = "standard",
+    proof_hex: str = "",
+    public_inputs: Optional[list] = None,
+    proof_scheme: str = "groth16",
+    transaction_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Dispatcher: rate-limit + route remittance redemptions to high priority.
+
+    Returns ``{"task_id", "queue", "task_name", "priority", ...}``.
+    Raises ``RateLimitExceeded`` (with ``retry_after``) on overflow and
+    ``ValueError`` on invalid input.
+    """
+    from app.services.zk_proof_queue import request_proof_generation as _dispatch
+
+    result = _dispatch(
+        user_id=user_id,
+        job_type=job_type,
+        priority=priority,
+        proof_hex=proof_hex,
+        public_inputs=public_inputs,
+        proof_scheme=proof_scheme,
+        transaction_id=transaction_id,
+    )
+    return {
+        "task_id": result.task_id,
+        "queue": result.queue,
+        "task_name": result.task_name,
+        "priority": result.priority,
+        "remaining": result.remaining,
+        "retry_after": result.retry_after,
+    }
 
 
 # ---------------------------------------------------------------------------

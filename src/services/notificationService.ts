@@ -13,6 +13,7 @@ export enum AlertType {
   SYSTEM_FAILURE = "system_failure",
   KILL_SWITCH_TRIGGERED = "kill_switch_triggered",
   PRICE_ANOMALY = "price_anomaly",
+  ORACLE_STALE_PRICE = "oracle_stale_price",
   API_ERROR = "api_error",
   DATABASE_ERROR = "database_error",
   FAILOVER_EVENT = "failover_event",

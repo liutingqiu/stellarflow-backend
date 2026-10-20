@@ -34,6 +34,7 @@ dotenv.config();
 import { priceReviewService } from "../priceReviewService";
 import { webhookService } from "../webhook";
 import { anomalyDetectionService } from "../anomalyDetection";
+import { oracleStalePriceAlertService } from "../oracleStalePriceAlertService";
 
 export class MarketRateService {
   private fetchers: Map<string, MarketRateFetcher> = new Map();
@@ -63,6 +64,7 @@ export class MarketRateService {
   constructor() {
     this.stellarService = new StellarService();
     this.multiSigEnabled = process.env.MULTI_SIG_ENABLED === "true";
+    oracleStalePriceAlertService.start();
 
     const remoteServersEnv = process.env.REMOTE_ORACLE_SERVERS || "";
     if (remoteServersEnv) {
@@ -240,6 +242,15 @@ export class MarketRateService {
 
       const reviewAssessment =
         await priceReviewService.assessRate(normalizedRate);
+
+      if (!reviewAssessment.manualReviewRequired) {
+        oracleStalePriceAlertService.observePrice({
+          asset: normalizedCurrency,
+          price: normalizedRate.rate,
+          observedAt: normalizedRate.timestamp,
+          source: normalizedRate.source,
+        });
+      }
 
       const enrichedRate: MarketRate = {
         ...normalizedRate,

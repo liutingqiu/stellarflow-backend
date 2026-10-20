@@ -21,11 +21,24 @@ export interface StorageTtlInspection {
   description: string;
 }
 
+export interface FootprintAccessEntry {
+  index: number;
+  access: "read-only" | "read-write";
+  keyType: string;
+  keyXdr: string;
+}
+
+export interface SorobanFootprintInspection {
+  readOnly: FootprintAccessEntry[];
+  readWrite: FootprintAccessEntry[];
+}
+
 export interface SorobanPreflightReport {
   ready: boolean;
   simulationSucceeded: boolean;
   authEntries: AuthorizationEntryInspection[];
   storageTtl: StorageTtlInspection[];
+  footprint: SorobanFootprintInspection | null;
   errors: string[];
 }
 
@@ -54,6 +67,15 @@ export class SorobanContractPreflightInspector {
     let simulationSucceeded = false;
     let authEntries: AuthorizationEntryInspection[] = [];
     let storageTtl: StorageTtlInspection[] = [];
+    let footprint: SorobanFootprintInspection | null = null;
+
+    try {
+      footprint = this.inspectFootprint(transaction);
+    } catch (error) {
+      errors.push(
+        `Unable to inspect transaction footprint: ${this.describeError(error)}`,
+      );
+    }
 
     try {
       const simulation = await this.rpcServer.simulateTransaction(transaction);
@@ -96,7 +118,51 @@ export class SorobanContractPreflightInspector {
       simulationSucceeded,
       authEntries,
       storageTtl,
+      footprint,
       errors,
+    };
+  }
+
+  inspectFootprint(
+    transaction: Transaction,
+  ): SorobanFootprintInspection | null {
+    const envelope = transaction.toEnvelope();
+    let innerTransaction: xdr.Transaction;
+
+    switch (envelope.switch().name) {
+      case "envelopeTypeTx":
+        innerTransaction = envelope.v1().tx();
+        break;
+      case "envelopeTypeTxFeeBump":
+        innerTransaction = envelope.feeBump().tx().innerTx().v1().tx();
+        break;
+      default:
+        return null;
+    }
+
+    const transactionExtension = innerTransaction.ext();
+    if (transactionExtension.switch() !== 1) {
+      return null;
+    }
+
+    const footprint = transactionExtension
+      .sorobanData()
+      .resources()
+      .footprint();
+    const inspectKeys = (
+      keys: xdr.LedgerKey[],
+      access: FootprintAccessEntry["access"],
+    ): FootprintAccessEntry[] =>
+      keys.map((key, index) => ({
+        index,
+        access,
+        keyType: key.switch().name,
+        keyXdr: key.toXDR("base64"),
+      }));
+
+    return {
+      readOnly: inspectKeys(footprint.readOnly(), "read-only"),
+      readWrite: inspectKeys(footprint.readWrite(), "read-write"),
     };
   }
 
