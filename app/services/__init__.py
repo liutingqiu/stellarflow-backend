@@ -10,6 +10,11 @@ try:
 except Exception:
     DatabaseSettlementLatencyWorker = None  # type: ignore
 
-__all__ = ["NonceManager", "RelayerPool", "nonce_manager", "DatabaseSettlementLatencyWorker"]
+try:
+    from .payout_anchor_health import PayoutAnchorAvailabilityWorker
+except Exception:
+    PayoutAnchorAvailabilityWorker = None  # type: ignore
+
+__all__ = ["NonceManager", "RelayerPool", "nonce_manager", "DatabaseSettlementLatencyWorker", "PayoutAnchorAvailabilityWorker"]
 
 

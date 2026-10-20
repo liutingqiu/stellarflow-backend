@@ -100,6 +100,12 @@ celery_app.conf.update(
             "task": "app.tasks.poll_anchor_settlement_statuses",
             "schedule": 30.0,
         },
+        "check-payout-anchor-availability": {
+            # Issue #1288 — ping payout anchor /info endpoints every 30s,
+            # mark OFFLINE after 3 consecutive failures (90s detection).
+            "task": "app.tasks.check_payout_anchor_availability",
+            "schedule": 30.0,
+        },
         "monitor-fiat-settlement-latency": {
             "task": "app.tasks.monitor_fiat_settlement_latency",
             "schedule": crontab(minute="*/5"),

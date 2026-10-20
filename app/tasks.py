@@ -58,6 +58,22 @@ def monitor_fiat_settlement_latency(self: DatabaseTask, lookback_hours: int = 24
     return asyncio.run(worker.run_evaluation_cycle(lookback_hours=lookback_hours))
 
 
+@celery_app.task(
+    bind=True,
+    base=DatabaseTask,
+    name="app.tasks.check_payout_anchor_availability",
+    autoretry_for=(OSError, asyncpg.PostgresError),
+    retry_backoff=True,
+    max_retries=3,
+)
+def check_payout_anchor_availability(self: DatabaseTask) -> Dict[str, Any]:
+    """Issue #1288 — ping payout anchor /info endpoints every 30s, mark OFFLINE after 3 fails."""
+    from app.services.payout_anchor_health import PayoutAnchorAvailabilityWorker
+    database_url = DatabaseTask._database_url or os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+    worker = PayoutAnchorAvailabilityWorker(database_url=database_url)
+    return asyncio.run(worker.run_health_check_cycle())
+
+
 
 async def _aggregate(granularity: str, cutoff: datetime) -> int:
     database_url = DatabaseTask._database_url

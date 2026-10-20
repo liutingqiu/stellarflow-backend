@@ -28,6 +28,7 @@ class AnchorHealthStatus(str, Enum):
     DEGRADED = "DEGRADED"
     DEACTIVATED = "DEACTIVATED"
     SLA_BREACHED = "SLA_BREACHED"
+    OFFLINE = "OFFLINE"
 
 
 @dataclass(frozen=True)
@@ -401,7 +402,7 @@ class FiatSettlementLatencyMonitor:
         pair_key = (anchor_id, corridor_key)
 
         self._anchor_statuses[pair_key] = status
-        if status in {AnchorHealthStatus.DEACTIVATED, AnchorHealthStatus.SLA_BREACHED}:
+        if status in {AnchorHealthStatus.DEACTIVATED, AnchorHealthStatus.SLA_BREACHED, AnchorHealthStatus.OFFLINE}:
             self._deactivated_at[pair_key] = datetime.now(timezone.utc)
             if reason:
                 self._deactivation_reasons[pair_key] = reason
@@ -624,7 +625,7 @@ class FiatSettlementLatencyMonitor:
         for anchor_id in sorted(anchors):
             m = self.get_anchor_metrics(anchor_id, c, window_seconds=window_seconds)
             anchor_metrics_map[anchor_id] = m
-            if m.status in {AnchorHealthStatus.DEACTIVATED, AnchorHealthStatus.SLA_BREACHED}:
+            if m.status in {AnchorHealthStatus.DEACTIVATED, AnchorHealthStatus.SLA_BREACHED, AnchorHealthStatus.OFFLINE}:
                 deactivated_anchors.append(anchor_id)
             else:
                 active_anchors.append(anchor_id)
@@ -813,6 +814,7 @@ class FiatSettlementLatencyMonitor:
         already_deactivated = self._anchor_statuses.get(pair_key) in {
             AnchorHealthStatus.DEACTIVATED,
             AnchorHealthStatus.SLA_BREACHED,
+            AnchorHealthStatus.OFFLINE,
         }
 
         reason = (
